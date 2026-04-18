@@ -83,6 +83,20 @@ class TextResponse(BaseModel):
     processing_time_ms: int
 
 
+class TranscriptData(BaseModel):
+    """Transcript metadata for audio interactions."""
+    user_input: str
+    agent_response: str
+
+
+class EnhancedAudioResponse(BaseModel):
+    """Response model for audio queries with transcript and timing."""
+    success: bool
+    audio_response: str
+    transcript: TranscriptData
+    processing_time_ms: int
+
+
 app = FastAPI(
     title="Audio Customer Support Agent API",
     description="REST API for testing the STT -> LLM -> TTS pipeline",
@@ -250,7 +264,7 @@ async def chat_text(request: TextRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/chat/audio")
+@app.post("/chat/audio", response_model=EnhancedAudioResponse)
 async def chat_audio(audio: UploadFile = File(...)):
     """
     TODO: Process audio query through the complete pipeline.
@@ -261,7 +275,7 @@ async def chat_audio(audio: UploadFile = File(...)):
         audio: Audio file upload (WAV, MP3, etc.)
         
     Returns:
-        Audio response as bytes
+        JSON payload with base64 audio, transcript, and timing metadata
     """
     global pipeline
     
@@ -273,14 +287,25 @@ async def chat_audio(audio: UploadFile = File(...)):
         if len(audio_bytes) == 0:
             raise HTTPException(status_code=400, detail="Empty audio file")
 
-        response_audio = await pipeline.process_audio(audio_bytes)
+        process_with_transcript = getattr(pipeline, "process_audio_with_transcript", None)
+        if not callable(process_with_transcript):
+            raise HTTPException(status_code=503, detail="Transcript-capable audio processing is unavailable")
 
-        return Response(
-            content=response_audio,
-            media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": "attachment; filename=response.mp3"
-            }
+        response_audio, transcript_data, processing_time_ms = await process_with_transcript(
+            audio_bytes
+        )
+        if not isinstance(response_audio, bytes):
+            raise HTTPException(status_code=500, detail="Audio response payload is missing or invalid")
+        encoded_audio = base64.b64encode(response_audio).decode("utf-8")
+
+        return EnhancedAudioResponse(
+            success=True,
+            audio_response=encoded_audio,
+            transcript=TranscriptData(
+                user_input=str(getattr(transcript_data, "user_input", "")),
+                agent_response=str(getattr(transcript_data, "agent_response", "")),
+            ),
+            processing_time_ms=int(processing_time_ms),
         )
         
     except HTTPException:

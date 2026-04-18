@@ -7,6 +7,7 @@ Students should complete the implementation to connect all components.
 
 import asyncio
 import logging
+from time import perf_counter
 from typing import Optional, Dict, Any, Tuple, AsyncIterable, AsyncIterator, List
 from dataclasses import dataclass
 
@@ -23,6 +24,14 @@ class PipelineConfig:
     llm_config: Dict[str, Any]
     tts_config: Dict[str, Any]
     enable_logging: bool = True
+
+
+@dataclass
+class TranscriptData:
+    """Transcript metadata for a processed request."""
+
+    user_input: str
+    agent_response: str
 
 
 class AudioSupportPipeline:
@@ -139,6 +148,42 @@ class AudioSupportPipeline:
         except Exception as e:
             self.logger.error(f"Pipeline processing failed: {str(e)}")
             raise
+
+    async def process_audio_with_transcript(
+        self, audio_bytes: bytes, **kwargs
+    ) -> Tuple[bytes, TranscriptData, int]:
+        """Process audio and return response audio, transcript data, and timing."""
+        start_time = perf_counter()
+        if not self.is_initialized:
+            raise RuntimeError("Pipeline not initialized. Call initialize() first.")
+
+        try:
+            if not self.stt or not self.llm_agent or not self.tts:
+                raise RuntimeError("Pipeline components are unavailable")
+
+            self.logger.info("Converting speech to text...")
+            text_input = await self.stt.transcribe(audio_bytes, **kwargs)
+            self.logger.info(f"Transcribed text: {text_input}")
+
+            self.logger.info("Processing query with LLM agent...")
+            agent_response = await self.llm_agent.process_query(text_input, **kwargs)
+            self.logger.info(f"Agent response: {agent_response}")
+
+            self.logger.info("Converting response to speech...")
+            response_audio = await self.tts.synthesize(agent_response, **kwargs)
+            self.logger.info("Audio response generated successfully")
+
+            transcript_data = self._create_transcript_data(
+                user_input=text_input,
+                agent_response=agent_response,
+            )
+            processing_time_ms = int((perf_counter() - start_time) * 1000)
+
+            return response_audio, transcript_data, processing_time_ms
+
+        except Exception as e:
+            self.logger.error(f"Pipeline processing failed: {str(e)}")
+            raise
     
     async def process_text(self, text_input: str, **kwargs) -> Tuple[str, bytes]:
         """
@@ -168,6 +213,31 @@ class AudioSupportPipeline:
         except Exception as e:
             self.logger.error(f"Text processing failed: {str(e)}")
             raise
+
+    async def process_text_with_timing(self, text: str, **kwargs) -> Tuple[str, int]:
+        """Process text and return agent response text with end-to-end timing."""
+        start_time = perf_counter()
+        if not self.is_initialized:
+            raise RuntimeError("Pipeline not initialized. Call initialize() first.")
+
+        try:
+            if not self.llm_agent:
+                raise RuntimeError("Pipeline components are unavailable")
+
+            self.logger.info(f"Processing text query: {text}")
+            agent_response = await self.llm_agent.process_query(text, **kwargs)
+            processing_time_ms = int((perf_counter() - start_time) * 1000)
+            return agent_response, processing_time_ms
+
+        except Exception as e:
+            self.logger.error(f"Text processing failed: {str(e)}")
+            raise
+
+    def _create_transcript_data(
+        self, user_input: str, agent_response: str
+    ) -> TranscriptData:
+        """Create transcript data payload for callers."""
+        return TranscriptData(user_input=user_input, agent_response=agent_response)
 
     async def process_audio_stream(
         self,

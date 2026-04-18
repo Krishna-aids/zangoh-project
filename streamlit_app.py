@@ -21,6 +21,7 @@ import json
 import time
 import io
 import wave
+import binascii
 import numpy as np
 from typing import Dict, Any, Optional
 import base64
@@ -80,7 +81,7 @@ def check_server_status(server_url: str) -> Dict[str, Any]:
             "error": str(e)
         }
 
-def send_text_message(server_url: str, text: str, parameters: Dict[str, Any] = None) -> Dict[str, Any]:
+def send_text_message(server_url: str, text: str, parameters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Send text message to the chat endpoint."""
     try:
         payload = {
@@ -125,16 +126,37 @@ def send_audio_message(server_url: str, audio_data: bytes) -> Dict[str, Any]:
         )
         
         if response.status_code == 200:
+            response_data = response.json()
+            if not response_data.get("success", False):
+                return {
+                    "success": False,
+                    "error": response_data.get("error", "Audio request was not successful")
+                }
+
+            audio_response = response_data.get("audio_response")
+            transcript = response_data.get("transcript") or {}
+            decoded_audio = base64.b64decode(audio_response, validate=True) if audio_response else b""
+
             return {
                 "success": True,
-                "audio_data": response.content,
-                "content_type": response.headers.get('content-type', 'audio/mpeg')
+                "audio_data": decoded_audio,
+                "content_type": "audio/mpeg",
+                "transcript": {
+                    "user_input": transcript.get("user_input", ""),
+                    "agent_response": transcript.get("agent_response", "")
+                },
+                "processing_time_ms": response_data.get("processing_time_ms")
             }
         else:
             return {
                 "success": False,
                 "error": f"HTTP {response.status_code}: {response.text}"
             }
+    except (ValueError, TypeError, binascii.Error) as e:
+        return {
+            "success": False,
+            "error": f"Invalid audio response format: {str(e)}"
+        }
     except requests.exceptions.RequestException as e:
         return {
             "success": False,
@@ -349,6 +371,19 @@ def main():
                     
                     if result['success']:
                         st.success(" Audio processed successfully!")
+                        if result.get('processing_time_ms') is not None:
+                            st.caption(f" Processing time: {result['processing_time_ms']}ms")
+
+                        transcript = result.get('transcript', {})
+                        user_input = transcript.get('user_input')
+                        agent_response = transcript.get('agent_response')
+                        if user_input or agent_response:
+                            st.markdown("**Transcript**")
+                            if user_input:
+                                st.markdown(f"**You said:** {user_input}")
+                            if agent_response:
+                                st.markdown(f"**Agent replied:** {agent_response}")
+
                         create_audio_player(result['audio_data'], "Agent Response")
                     else:
                         st.error(f" Error: {result['error']}")
