@@ -1,0 +1,36 @@
+[project]
+name = "zangoh-internship"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiofiles>=23.2.1",
+    "asyncio-mqtt>=0.13.0",
+    "black>=23.11.0",
+    "chromadb>=0.4.18",
+    "edge-tts>=6.1.9",
+    "fastapi>=0.104.1",
+    "flake8>=6.1.0",
+    "groq>=0.11.0",
+    "httpx>=0.25.0",
+    "langchain>=0.1.0",
+    "langchain-community>=0.0.10",
+    "langchain-openai>=0.0.5",
+    "librosa>=0.10.1",
+    "mypy>=1.7.1",
+    "numpy>=1.24.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "pydub>=0.25.1",
+    "pytest>=7.4.3",
+    "pytest-asyncio>=0.21.1",
+    "python-dotenv>=1.0.0",
+    "python-multipart>=0.0.6",
+    "requests>=2.31.0",
+    "sentence-transformers>=2.2.2",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.1",
+    "streamlit>=1.28.0",
+    "uvicorn[standard]>=0.24.0",
+]

@@ -1,0 +1,85 @@
+# Core API framework
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+
+# LLM and Agent framework (required)
+langchain>=0.1.0
+langchain-openai>=0.0.5
+langchain-community>=0.0.10
+
+# STT Options (choose one or more based on implementation)
+# API-based services:
+# deepgram-sdk>=3.3.6          # Deepgram API - free tier
+# assemblyai>=0.21.0           # AssemblyAI API
+# azure-cognitiveservices-speech>=1.34.0  # Azure Speech Services
+# google-cloud-speech>=2.21.0  # Google Cloud Speech
+
+# Pretrained models (local inference):
+# openai-whisper>=20231117     # OpenAI Whisper models (tiny, base, small, medium, large)
+# transformers>=4.35.0         # Hugging Face models (Wav2Vec2, etc.)
+# torch>=2.0.0                 # Required for Transformers
+# torchaudio>=2.0.0            # Audio processing for Torch
+# vosk>=0.3.45                 # Lightweight speech recognition
+# coqui-stt>=1.4.0             # Coqui STT models
+# SpeechRecognition>=3.10.0    # Simple offline/online STT
+
+# TTS Options (choose one or more based on implementation)
+# API-based services:  
+# elevenlabs>=1.0.0            # ElevenLabs API - free tier
+# openai>=1.3.0                # OpenAI TTS API
+# azure-cognitiveservices-speech>=1.34.0  # Azure Speech Services
+# google-cloud-texttospeech>=2.16.0  # Google Cloud TTS
+
+# Pretrained models (local inference):
+# TTS>=0.20.0                  # Coqui TTS - various pretrained models
+# parler-tts>=0.1.0            # Parler TTS from Hugging Face
+# bark>=1.0.0                  # Bark generative audio model
+# edge-tts>=6.1.9              # Free Microsoft Edge voices
+# festival>=2.5.0              # Classic speech synthesis
+# espeak>=1.48.0               # Lightweight multilingual TTS
+# piper-tts>=1.2.0             # Fast neural TTS
+
+# Vector stores and embeddings (for RAG) - Required
+chromadb>=0.4.18
+sentence-transformers>=2.2.2
+
+# HTTP client and file handling
+httpx>=0.25.0
+python-multipart>=0.0.6
+aiofiles>=23.2.1
+groq>=0.11.0
+edge-tts>=6.1.9
+
+# Environment and configuration
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Audio processing utilities
+pydub>=0.25.1
+librosa>=0.10.1
+soundfile>=0.12.1
+
+# Async and concurrency
+asyncio-mqtt>=0.13.0
+
+# Streamlit UI dependencies
+streamlit>=1.28.0
+sounddevice>=0.4.6
+numpy>=1.24.0
+requests>=2.31.0
+
+# Development dependencies
+pytest>=7.4.3
+pytest-asyncio>=0.21.1
+black>=23.11.0
+flake8>=6.1.0
+mypy>=1.7.1
+
+# Optional TTS alternatives
+# TTS>=0.20.0  # Coqui TTS for local inference
+# edge-tts>=6.1.9  # Microsoft Edge TTS (free)
+
+# Optional STT alternatives  
+# openai-whisper>=20231117  # OpenAI Whisper for local inference
+# SpeechRecognition>=3.10.0  # Google Speech Recognition
