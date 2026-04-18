@@ -108,10 +108,10 @@ class STTService(BaseSTT):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
         self.client: Optional[httpx.AsyncClient] = None
-        self.model = self.config.get("model", "whisper-large-v3-turbo")
-        self.language = self.config.get("language")
-        self.timeout_seconds = float(self.config.get("timeout_seconds", 20.0))
-        self.max_chunk_bytes = int(self.config.get("max_chunk_bytes", 5 * 1024 * 1024))
+        self.model = self.config.get("model") or os.getenv("STT_MODEL") or os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo")
+        self.language = self.config.get("language") or os.getenv("STT_LANGUAGE")
+        self.timeout_seconds = float(self.config.get("timeout_seconds", os.getenv("STT_TIMEOUT_SECONDS", 20.0)))
+        self.max_chunk_bytes = int(self.config.get("max_chunk_bytes", os.getenv("STT_MAX_CHUNK_BYTES", 5 * 1024 * 1024)))
     
     async def initialize(self) -> None:
         """
@@ -147,9 +147,15 @@ class STTService(BaseSTT):
         self.client = vosk.Model(model_path)
         ```
         """
-        api_key = self.config.get("api_key") or os.getenv("GROQ_API_KEY")
+        api_key = (
+            self.config.get("api_key")
+            or os.getenv("STT_API_KEY")
+            or os.getenv("GROQ_API_KEY")
+        )
         if not api_key:
-            raise ValueError("GROQ API key not provided. Set config['api_key'] or GROQ_API_KEY.")
+            raise ValueError(
+                "STT API key not provided. Set config['api_key'] or STT_API_KEY (fallback: GROQ_API_KEY)."
+            )
 
         headers = {"Authorization": f"Bearer {api_key}"}
         self.client = httpx.AsyncClient(

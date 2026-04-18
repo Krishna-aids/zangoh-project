@@ -131,9 +131,9 @@ class TTSService(BaseTTS):
         self.client = None
         self.voice_id: str = ""
         self.model = None
-        self.rate = self.config.get("rate", "+0%")
-        self.volume = self.config.get("volume", "+0%")
-        self.timeout_seconds = float(self.config.get("timeout_seconds", 20.0))
+        self.rate = self.config.get("rate") or os.getenv("TTS_RATE") or os.getenv("EDGE_TTS_RATE", "+0%")
+        self.volume = self.config.get("volume") or os.getenv("TTS_VOLUME") or os.getenv("EDGE_TTS_VOLUME", "+0%")
+        self.timeout_seconds = float(self.config.get("timeout_seconds", os.getenv("TTS_TIMEOUT_SECONDS", 20.0)))
     
     async def initialize(self) -> None:
         """
@@ -178,10 +178,11 @@ class TTSService(BaseTTS):
         self.voice_id = str(
             self.config.get("voice")
             or self.config.get("voice_id")
+            or os.getenv("TTS_VOICE")
             or os.getenv("EDGE_TTS_VOICE", "en-US-AriaNeural")
         )
         if not self.voice_id:
-            raise ValueError("TTS voice must be provided via config or EDGE_TTS_VOICE.")
+            raise ValueError("TTS voice must be provided via config, TTS_VOICE, or EDGE_TTS_VOICE.")
         self.is_initialized = True
     
     async def synthesize(self, text: str, **kwargs) -> bytes:
@@ -334,8 +335,8 @@ class TTSService(BaseTTS):
             raise ValueError("Text cannot be empty")
 
         voice = str(kwargs.get("voice") or self.voice_id)
-        rate = kwargs.get("rate", self.rate)
-        volume = kwargs.get("volume", self.volume)
+        rate = str(kwargs.get("rate", self.rate))
+        volume = str(kwargs.get("volume", self.volume))
 
         communicate = edge_tts.Communicate(
             text=text.strip(),

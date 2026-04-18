@@ -17,9 +17,42 @@ import os
 
 from src.pipeline import AudioSupportPipeline, create_pipeline
 
-WS_MAX_QUEUE_SIZE = int(os.getenv("WS_STREAM_QUEUE_MAXSIZE", "32"))
-WS_MAX_FRAME_BYTES = int(os.getenv("WS_STREAM_MAX_FRAME_BYTES", str(512 * 1024)))
-WS_QUEUE_PUT_TIMEOUT_SECONDS = float(os.getenv("WS_STREAM_QUEUE_PUT_TIMEOUT_SECONDS", "0.5"))
+logger = logging.getLogger(__name__)
+
+
+def _first_env(*names: str) -> Optional[str]:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
+
+
+def _env_float(*names: str, default: float) -> float:
+    value = _first_env(*names)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        logger.warning("Invalid float for %s=%r. Using default=%s.", names[0], value, default)
+        return default
+
+
+def _env_int(*names: str, default: int) -> int:
+    value = _first_env(*names)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("Invalid int for %s=%r. Using default=%s.", names[0], value, default)
+        return default
+
+
+WS_MAX_QUEUE_SIZE = _env_int("WS_STREAM_QUEUE_MAXSIZE", default=32)
+WS_MAX_FRAME_BYTES = _env_int("WS_STREAM_MAX_FRAME_BYTES", default=512 * 1024)
+WS_QUEUE_PUT_TIMEOUT_SECONDS = _env_float("WS_STREAM_QUEUE_PUT_TIMEOUT_SECONDS", default=0.5)
 
 
 def _pipeline_error_message(event: Dict[str, Any]) -> str:
@@ -72,7 +105,6 @@ pipeline: Optional[AudioSupportPipeline] = None
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 
 @app.on_event("startup")
@@ -88,23 +120,29 @@ async def startup_event():
         logger.info("Starting Audio Support Agent API server...")
 
         stt_config = {
-            "api_key": os.getenv("GROQ_API_KEY"),
-            "model": os.getenv("GROQ_STT_MODEL", "whisper-large-v3-turbo"),
-            "timeout_seconds": float(os.getenv("STT_TIMEOUT_SECONDS", "20")),
+            "provider": _first_env("STT_PROVIDER") or "groq",
+            "api_key": _first_env("STT_API_KEY", "GROQ_API_KEY"),
+            "model": _first_env("STT_MODEL", "GROQ_STT_MODEL") or "whisper-large-v3-turbo",
+            "language": _first_env("STT_LANGUAGE"),
+            "timeout_seconds": _env_float("STT_TIMEOUT_SECONDS", default=20.0),
+            "max_chunk_bytes": _env_int("STT_MAX_CHUNK_BYTES", default=5 * 1024 * 1024),
         }
 
         llm_config = {
-            "provider": os.getenv("LLM_PROVIDER", "groq"),
-            "api_key": os.getenv("GROQ_API_KEY"),
-            "model": os.getenv("GROQ_LLM_MODEL", "llama-3.1-8b-instant"),
-            "temperature": float(os.getenv("LLM_TEMPERATURE", "0.2")),
-            "timeout_seconds": float(os.getenv("LLM_TIMEOUT_SECONDS", "30")),
+            "provider": _first_env("LLM_PROVIDER") or "groq",
+            "api_key": _first_env("LLM_API_KEY", "GROQ_API_KEY"),
+            "model": _first_env("LLM_MODEL", "GROQ_LLM_MODEL") or "llama-3.1-8b-instant",
+            "temperature": _env_float("LLM_TEMPERATURE", default=0.2),
+            "timeout_seconds": _env_float("LLM_TIMEOUT_SECONDS", default=30.0),
         }
 
         tts_config = {
-            "voice": os.getenv("EDGE_TTS_VOICE", "en-US-AriaNeural"),
-            "rate": os.getenv("EDGE_TTS_RATE", "+0%"),
-            "volume": os.getenv("EDGE_TTS_VOLUME", "+0%"),
+            "provider": _first_env("TTS_PROVIDER") or "edge",
+            "api_key": _first_env("TTS_API_KEY"),
+            "voice": _first_env("TTS_VOICE", "EDGE_TTS_VOICE") or "en-US-AriaNeural",
+            "rate": _first_env("TTS_RATE", "EDGE_TTS_RATE") or "+0%",
+            "volume": _first_env("TTS_VOLUME", "EDGE_TTS_VOLUME") or "+0%",
+            "timeout_seconds": _env_float("TTS_TIMEOUT_SECONDS", default=20.0),
         }
 
         pipeline = await create_pipeline(stt_config, llm_config, tts_config)

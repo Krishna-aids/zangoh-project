@@ -6,10 +6,11 @@ A modular audio-based customer support agent that uses Speech-to-Text (STT), Lar
 
 This project provides a **blueprint** for implementing an audio customer support agent. Students implement the core functionality by completing TODO sections throughout the codebase.
 
-### Pipeline Flow
-```
-Audio Input → STT → LLM Agent (with RAG) → TTS → Audio Output
-```
+### Assignment Pipeline Modes
+- **Baseline (required):** Batch flow `Audio Input → STT → LLM Agent (with RAG) → TTS → Audio Output` via `POST /chat/audio`.
+- **Additive streaming (extension):** `/chat/audio/stream`
+  - **Primary:** WebSocket (`ws://localhost:8000/chat/audio/stream`)
+  - **Fallback:** HTTP streaming (`POST /chat/audio/stream`)
 
 ## Architecture
 
@@ -63,7 +64,6 @@ audio_support_agent/
 │   ├── __init__.py
 │   └── pipeline.py              # Main orchestrator
 ├── docs/
-│   ├── ASSIGNMENT_GUIDE.md      # Implementation instructions
 │   └── RAG_IMPLEMENTATION_GUIDE.md  # Detailed RAG guide
 ├── tests/                       # Test files
 ├── data/                        # ChromaDB storage (created automatically)
@@ -85,26 +85,34 @@ cd audio_support_agent
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install core dependencies
-pip install fastapi uvicorn streamlit requests numpy
-pip install langchain chromadb sentence-transformers
-
-# Optional: For audio recording in UI
-pip install sounddevice
+# Install project dependencies
+pip install -r requirements.txt
 ```
 
 ### 2. Environment Setup
 
 ```bash
 # Copy environment template
+# Windows (PowerShell):
+Copy-Item .env.example .env
+# macOS/Linux:
 cp .env.example .env
-
-# Edit .env with your API keys (based on chosen services)
-# Example:
-STT_API_KEY=your_deepgram_key_here
-LLM_API_KEY=your_openai_key_here
-TTS_API_KEY=your_elevenlabs_key_here
 ```
+
+Set `.env` values to match `.env.example` and server defaults:
+- Required (default setup): `GROQ_API_KEY`
+- Optional provider keys: `STT_API_KEY`, `LLM_API_KEY`, `TTS_API_KEY`
+- Optional provider selection: `STT_PROVIDER`, `LLM_PROVIDER`, `TTS_PROVIDER`
+- Optional streaming tuning: `WS_STREAM_QUEUE_MAXSIZE`, `WS_STREAM_MAX_FRAME_BYTES`, `WS_STREAM_QUEUE_PUT_TIMEOUT_SECONDS`
+
+Current default runtime path:
+- STT: `groq` with `whisper-large-v3-turbo`
+- LLM: `groq` with `llama-3.1-8b-instant`
+- TTS: `edge` with `en-US-AriaNeural`
+
+### 2.1 Assignment Library Constraint
+- **Allowed:** Libraries already used in this template (FastAPI, LangChain/ChromaDB, `groq`, `edge-tts`, etc.) to implement STT, LLM, and TTS components.
+- **Prohibited (assignment scope):** Replacing the required STT→LLM→TTS implementation with a single end-to-end voice-agent framework that bypasses component-level work.
 
 ### 3. Service Options
 
@@ -168,10 +176,17 @@ curl -X POST http://localhost:8000/chat/text \
   -H "Content-Type: application/json" \
   -d '{"text": "What is your return policy?"}'
 
-# Audio upload (full pipeline)
+# Baseline assignment: batch STT -> LLM -> TTS
 curl -X POST http://localhost:8000/chat/audio \
   -F "audio=@test_audio.wav" --output response.mp3
+
+# Additive streaming fallback: HTTP stream response
+curl -X POST http://localhost:8000/chat/audio/stream \
+  -F "audio=@test_audio.wav" --output response_stream.mp3
 ```
+
+**Streaming primary path:** WebSocket `ws://localhost:8000/chat/audio/stream`  
+Client sends binary audio frames, then text frame `END`; server emits `stt.partial`, `llm.token`, `tts.audio`, and `stream.complete`.
 
 ## Development Utilities
 
@@ -230,7 +245,7 @@ pytest tests/test_llm.py -v
 4. **Pipeline Integration**: Complete pipeline initialization and audio processing flow
 5. **Server Configuration**: Configure startup with your chosen services
 
-**See `docs/ASSIGNMENT_GUIDE.md` for detailed implementation instructions.**
+**See `docs/RAG_IMPLEMENTATION_GUIDE.md` for detailed implementation instructions.**
 
 ## Troubleshooting
 
@@ -273,7 +288,6 @@ By completing this assignment, you will learn:
 
 ## Documentation
 
-- **Implementation Guide**: `docs/ASSIGNMENT_GUIDE.md` - Detailed coding instructions
 - **RAG Guide**: `docs/RAG_IMPLEMENTATION_GUIDE.md` - Specific RAG implementation help
 - **API Documentation**: Available at `/docs` when server is running
 

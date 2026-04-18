@@ -8,23 +8,11 @@ Students should implement the RAG tool function and complete the agent setup.
 """
 
 from abc import ABC, abstractmethod
-import importlib
 import json
 import os
 from typing import Optional, Dict, Any, List, AsyncIterator, cast
 
 import httpx
-
-LANGCHAIN_AVAILABLE = importlib.util.find_spec("langchain") is not None
-
-ConversationBufferMemory: Any = None
-if LANGCHAIN_AVAILABLE:
-    try:
-        memory_module = importlib.import_module("langchain.memory")
-        ConversationBufferMemory = getattr(memory_module, "ConversationBufferMemory", None)
-    except Exception:
-        ConversationBufferMemory = None
-
 
 class BaseAgent(ABC):
     """
@@ -40,13 +28,7 @@ class BaseAgent(ABC):
         """
         self.config = config or {}
         self.is_initialized = False
-        if LANGCHAIN_AVAILABLE and ConversationBufferMemory:
-            self.memory = ConversationBufferMemory(
-                memory_key="chat_history",
-                return_messages=True,
-            )
-        else:
-            self.memory = []
+        self.memory: List[Dict[str, str]] = []
     
     @abstractmethod
     async def initialize(self) -> None:
@@ -75,7 +57,7 @@ class BaseAgent(ABC):
 
 class CustomerSupportAgent(BaseAgent):
     """
-    Customer Support Agent implementation using LangChain ReAct agent.
+    Customer Support Agent implementation with direct LLM + RAG flow.
     
     This agent uses a Language Model with RAG capabilities to answer
     customer support queries by retrieving relevant information from
@@ -85,14 +67,12 @@ class CustomerSupportAgent(BaseAgent):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__(config)
         self.llm = None
-        self.agent = None
-        self.agent_executor = None
         self.knowledge_base = None
         self.http_client: Optional[httpx.AsyncClient] = None
-        self.provider = self.config.get("provider", "groq").lower()
-        self.model = self.config.get("model", "llama-3.1-8b-instant")
-        self.temperature = float(self.config.get("temperature", 0.2))
-        self.timeout_seconds = float(self.config.get("timeout_seconds", 30.0))
+        self.provider = str(self.config.get("provider") or os.getenv("LLM_PROVIDER", "groq")).lower()
+        self.model = self.config.get("model") or os.getenv("LLM_MODEL") or os.getenv("GROQ_LLM_MODEL", "llama-3.1-8b-instant")
+        self.temperature = float(self.config.get("temperature", os.getenv("LLM_TEMPERATURE", 0.2)))
+        self.timeout_seconds = float(self.config.get("timeout_seconds", os.getenv("LLM_TIMEOUT_SECONDS", 30.0)))
         
     async def initialize(self) -> None:
         """
@@ -106,22 +86,24 @@ class CustomerSupportAgent(BaseAgent):
         5. Set up agent executor
         """
         if self.provider == "groq":
-            api_key = self.config.get("api_key") or os.getenv("GROQ_API_KEY")
+            api_key = (
+                self.config.get("api_key")
+                or os.getenv("LLM_API_KEY")
+                or os.getenv("GROQ_API_KEY")
+            )
             if not api_key:
-                raise ValueError("GROQ API key not provided. Set config['api_key'] or GROQ_API_KEY.")
+                raise ValueError(
+                    "LLM API key not provided. Set config['api_key'] or LLM_API_KEY (fallback: GROQ_API_KEY)."
+                )
             self.http_client = httpx.AsyncClient(
                 base_url="https://api.groq.com/openai/v1",
                 headers={"Authorization": f"Bearer {api_key}"},
                 timeout=httpx.Timeout(self.timeout_seconds),
             )
+        else:
+            raise ValueError("Only the baseline 'groq' provider is supported.")
 
         await self._setup_knowledge_base()
-
-        tools = await self._create_tools()
-
-        # LangChain remains optional fallback.
-        if self.provider == "langchain":
-            await self._create_agent(tools)
 
         self.is_initialized = True
     
@@ -300,31 +282,6 @@ class CustomerSupportAgent(BaseAgent):
             }
         ]
     
-    async def _create_tools(self) -> List[Any]:
-        """
-        TODO: Create tools for the agent, including the RAG tool.
-        
-        Returns:
-            List[Tool]: List of tools available to the agent
-        """
-        tool_cls = None
-        if LANGCHAIN_AVAILABLE:
-            try:
-                tool_module = importlib.import_module("langchain.tools")
-                tool_cls = getattr(tool_module, "Tool", None)
-            except Exception:
-                tool_cls = None
-
-        if tool_cls:
-            return [
-                tool_cls(
-                    name="knowledge_search",
-                    description="Search the customer support knowledge base for relevant information",
-                    func=self._rag_search,
-                )
-            ]
-        return []
-    
     async def _rag_search(self, query: str) -> str:
         """
         TODO: Implement embedding-based retrieval from ChromaDB.
@@ -396,64 +353,6 @@ class CustomerSupportAgent(BaseAgent):
         except Exception as e:
             return f"Error searching knowledge base: {str(e)}"
     
-    async def _create_agent(self, tools: List[Any]) -> None:
-        """
-        TODO: Create the ReAct agent.
-        
-        Args:
-            tools: List of tools available to the agent
-        """
-        if not LANGCHAIN_AVAILABLE:
-            raise RuntimeError("LangChain fallback selected but LangChain is unavailable.")
-
-        try:
-            agents_module = importlib.import_module("langchain.agents")
-            prompt_module = importlib.import_module("langchain_core.prompts")
-            create_react_agent = getattr(agents_module, "create_react_agent", None)
-            agent_executor_cls = getattr(agents_module, "AgentExecutor", None)
-            prompt_template_cls = getattr(prompt_module, "PromptTemplate", None)
-        except Exception as exc:
-            raise RuntimeError(
-                "LangChain fallback selected but required LangChain modules are unavailable."
-            ) from exc
-
-        if not create_react_agent or not agent_executor_cls or not prompt_template_cls:
-            raise RuntimeError(
-                "LangChain fallback selected but ReAct components are unavailable in this LangChain version."
-            )
-
-        if self.llm is None:
-            raise RuntimeError("LangChain fallback selected but no LangChain LLM client was configured.")
-
-        prompt_template = """
-        You are a helpful customer support agent. Use knowledge_search for policy questions.
-        You must provide concise, accurate answers grounded in tool output when available.
-
-        You have access to the following tools:
-        {tools}
-
-        Use the following format:
-        Question: the input question you must answer
-        Thought: you should always think about what to do
-        Action: the action to take, should be one of [{tool_names}]
-        Action Input: the input to the action
-        Observation: the result of the action
-        ... (this Thought/Action/Action Input/Observation can repeat N times)
-        Thought: I now know the final answer
-        Final Answer: the final answer to the original input question
-
-        Question: {input}
-        Thought: {agent_scratchpad}
-        """
-        prompt = prompt_template_cls.from_template(prompt_template)
-        self.agent = create_react_agent(self.llm, tools, prompt)
-        self.agent_executor = agent_executor_cls.from_agent_and_tools(
-            agent=self.agent,
-            tools=tools,
-            verbose=False,
-            memory=self.memory if LANGCHAIN_AVAILABLE else None,
-        )
-    
     async def process_query(self, text: str, **kwargs) -> str:
         """
         TODO: Process user query using the agent.
@@ -468,12 +367,6 @@ class CustomerSupportAgent(BaseAgent):
         if not self.is_initialized:
             raise RuntimeError("Agent not initialized")
 
-        if self.provider == "langchain":
-            if not self.agent_executor:
-                raise RuntimeError("LangChain agent executor is not initialized")
-            result = await self.agent_executor.arun(input=text)
-            return str(result)
-
         chunks = []
         async for token in self.stream_query(text, **kwargs):
             chunks.append(token)
@@ -487,12 +380,6 @@ class CustomerSupportAgent(BaseAgent):
             raise RuntimeError("Agent not initialized")
         if not text or not text.strip():
             raise ValueError("Query text cannot be empty")
-
-        if self.provider == "langchain":
-            result = await self.process_query(text, **kwargs)
-            if result:
-                yield result
-            return
 
         rag_context = await self._rag_search(text)
         prompt = (
@@ -513,8 +400,6 @@ class CustomerSupportAgent(BaseAgent):
             await self.http_client.aclose()
             self.http_client = None
         self.llm = None
-        self.agent = None
-        self.agent_executor = None
         self.is_initialized = False
 
     async def _groq_chat_stream(self, prompt: str, **kwargs) -> AsyncIterator[str]:
