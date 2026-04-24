@@ -1,24 +1,41 @@
 """
 FastAPI Server for Audio Customer Support Agent
 
-This module provides REST API endpoints for testing the audio support pipeline.
-Students can use this server to test their implementations via HTTP requests.
+Provides REST API endpoints for the full STT -> LLM -> TTS pipeline with
+transcript and timing metadata on every audio interaction.
+
+Endpoints
+─────────
+GET  /                        – API info
+GET  /health                  – Component health
+POST /chat/text               – Text query  (LLM-first, optional TTS)
+POST /chat/audio              – Audio query (STT + LLM + TTS) → JSON + transcript
+GET  /chat/audio/{text}       – Quick TTS test
+POST /debug/stt               – Isolated STT test
+POST /chat/audio/stream       – HTTP streaming fallback
+WS   /chat/audio/stream       – WebSocket low-latency streaming
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, AsyncIterator
 import asyncio
 import base64
 import logging
 import os
+from time import perf_counter
 
 from src.pipeline import AudioSupportPipeline, create_pipeline
 
 logger = logging.getLogger(__name__)
+import dotenv
 
+dotenv.load_dotenv()
+
+
+# ── Env helpers ───────────────────────────────────────────────────────────────
 
 def _first_env(*names: str) -> Optional[str]:
     for name in names:
@@ -50,9 +67,13 @@ def _env_int(*names: str, default: int) -> int:
         return default
 
 
+# ── WebSocket tuning ──────────────────────────────────────────────────────────
+
 WS_MAX_QUEUE_SIZE = _env_int("WS_STREAM_QUEUE_MAXSIZE", default=32)
 WS_MAX_FRAME_BYTES = _env_int("WS_STREAM_MAX_FRAME_BYTES", default=512 * 1024)
-WS_QUEUE_PUT_TIMEOUT_SECONDS = _env_float("WS_STREAM_QUEUE_PUT_TIMEOUT_SECONDS", default=0.5)
+WS_QUEUE_PUT_TIMEOUT_SECONDS = _env_float(
+    "WS_STREAM_QUEUE_PUT_TIMEOUT_SECONDS", default=0.5
+)
 
 
 def _pipeline_error_message(event: Dict[str, Any]) -> str:
@@ -63,80 +84,151 @@ def _pipeline_error_message(event: Dict[str, Any]) -> str:
     return f"Pipeline error at {stage}{chunk_text}: {message}"
 
 
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def _health_message(components: Dict[str, bool], errors: Dict[str, str]) -> str:
+    if all(components.values()):
+        return "All components ready"
+
+    unavailable = []
+    for component_key, ready_key in (
+        ("stt", "stt_ready"),
+        ("llm", "llm_ready"),
+        ("tts", "tts_ready"),
+    ):
+        if components.get(ready_key):
+            continue
+        detail = errors.get(component_key)
+        if detail:
+            unavailable.append(f"{component_key.upper()}: {detail}")
+        else:
+            unavailable.append(f"{component_key.upper()}: not ready")
+
+    prefix = "Text chat is available, but some components are degraded. "
+    if not components.get("llm_ready", False):
+        prefix = "Core LLM service is unavailable. "
+    return prefix + "; ".join(unavailable)
+
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
+
 class TextRequest(BaseModel):
-    """Request model for text-based queries."""
+    """Request body for text queries."""
     text: str
-    parameters: Optional[Dict[str, Any]] = {}
+    parameters: Dict[str, Any] = Field(default_factory=dict)
 
 
 class HealthResponse(BaseModel):
-    """Response model for health check."""
     status: str
     components: Dict[str, bool]
     message: str
 
 
 class TextResponse(BaseModel):
-    """Response model for text queries."""
+    """Response for /chat/text."""
     response_text: str
     audio_available: bool
     processing_time_ms: int
 
 
 class TranscriptData(BaseModel):
-    """Transcript metadata for audio interactions."""
+    """User/agent text transcript for an audio interaction."""
     user_input: str
     agent_response: str
 
 
+class OptionalTranscriptData(BaseModel):
+    """Nullable transcript fields for standardized error payloads."""
+    user_input: Optional[str] = None
+    agent_response: Optional[str] = None
+
+
 class EnhancedAudioResponse(BaseModel):
-    """Response model for audio queries with transcript and timing."""
+    """
+    Response for POST /chat/audio.
+
+    audio_response is the base64-encoded TTS audio (MP3).
+    """
     success: bool
-    audio_response: str
+    audio_response: str          # base64-encoded audio bytes
     transcript: TranscriptData
     processing_time_ms: int
 
 
+class AudioErrorResponse(BaseModel):
+    """Error response for POST /chat/audio."""
+    success: bool = False
+    error: str
+    transcript: OptionalTranscriptData = Field(default_factory=OptionalTranscriptData)
+    processing_time_ms: int
+
+
+def _audio_error_response(
+    status_code: int,
+    error: str,
+    start_time: Optional[float] = None,
+) -> JSONResponse:
+    processing_time_ms = 0
+    if start_time is not None:
+        processing_time_ms = int((perf_counter() - start_time) * 1000)
+
+    payload = AudioErrorResponse(
+        error=error,
+        processing_time_ms=processing_time_ms,
+    ).model_dump()
+    return JSONResponse(status_code=status_code, content=payload)
+
+
+# ── App setup ─────────────────────────────────────────────────────────────────
+
 app = FastAPI(
     title="Audio Customer Support Agent API",
-    description="REST API for testing the STT -> LLM -> TTS pipeline",
+    description="REST API for the STT -> LLM -> TTS pipeline with transcript support",
     version="1.0.0",
     docs_url="/docs",
-    redoc_url="/redoc"
+    redoc_url="/redoc",
 )
 
-# Add CORS middleware for frontend integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Global pipeline instance
 pipeline: Optional[AudioSupportPipeline] = None
-
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 
 
+# ── Lifecycle ─────────────────────────────────────────────────────────────────
+
 @app.on_event("startup")
 async def startup_event():
-    """
-    TODO: Initialize the pipeline on server startup.
-    
-    Students should configure the pipeline with their API keys and settings.
-    """
+    """Initialize the pipeline from environment variables on server startup."""
     global pipeline
-    
+
     try:
         logger.info("Starting Audio Support Agent API server...")
 
         stt_config = {
             "provider": _first_env("STT_PROVIDER") or "groq",
-            "api_key": _first_env("STT_API_KEY", "GROQ_API_KEY"),
-            "model": _first_env("STT_MODEL", "GROQ_STT_MODEL") or "whisper-large-v3-turbo",
+            "api_key": _first_env("STT_API_KEY"),
+            "model": _first_env("STT_MODEL"),
             "language": _first_env("STT_LANGUAGE"),
             "timeout_seconds": _env_float("STT_TIMEOUT_SECONDS", default=20.0),
             "max_chunk_bytes": _env_int("STT_MAX_CHUNK_BYTES", default=5 * 1024 * 1024),
@@ -144,8 +236,8 @@ async def startup_event():
 
         llm_config = {
             "provider": _first_env("LLM_PROVIDER") or "groq",
-            "api_key": _first_env("LLM_API_KEY", "GROQ_API_KEY"),
-            "model": _first_env("LLM_MODEL", "GROQ_LLM_MODEL") or "llama-3.1-8b-instant",
+            "api_key": _first_env("LLM_API_KEY"),
+            "model": _first_env("LLM_MODEL"),
             "temperature": _env_float("LLM_TEMPERATURE", default=0.2),
             "timeout_seconds": _env_float("LLM_TIMEOUT_SECONDS", default=30.0),
         }
@@ -153,15 +245,15 @@ async def startup_event():
         tts_config = {
             "provider": _first_env("TTS_PROVIDER") or "edge",
             "api_key": _first_env("TTS_API_KEY"),
-            "voice": _first_env("TTS_VOICE", "EDGE_TTS_VOICE") or "en-US-AriaNeural",
-            "rate": _first_env("TTS_RATE", "EDGE_TTS_RATE") or "+0%",
-            "volume": _first_env("TTS_VOLUME", "EDGE_TTS_VOLUME") or "+0%",
+            "voice": _first_env("TTS_VOICE"),
+            "rate": _first_env("TTS_RATE"),
+            "volume": _first_env("TTS_VOLUME"),
             "timeout_seconds": _env_float("TTS_TIMEOUT_SECONDS", default=20.0),
         }
 
         pipeline = await create_pipeline(stt_config, llm_config, tts_config)
         logger.info("Pipeline initialized and ready.")
-        
+
     except Exception as e:
         logger.error(f"Failed to initialize pipeline: {str(e)}")
         pipeline = None
@@ -169,35 +261,31 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Cleanup pipeline resources on server shutdown."""
+    """Gracefully shut down the pipeline."""
     global pipeline
-    
     if pipeline:
         logger.info("Shutting down pipeline...")
         await pipeline.cleanup()
         pipeline = None
 
 
+# ── Endpoints ─────────────────────────────────────────────────────────────────
+
 @app.get("/", response_model=Dict[str, str])
 async def root():
-    """Root endpoint with API information."""
     return {
         "message": "Audio Customer Support Agent API",
         "version": "1.0.0",
         "docs": "/docs",
-        "health": "/health"
+        "health": "/health",
     }
 
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """
-    Health check endpoint.
-    
-    Returns the status of all pipeline components.
-    """
+    """Return the readiness status of every pipeline component."""
     global pipeline
-    
+
     if not pipeline:
         return HealthResponse(
             status="unhealthy",
@@ -205,97 +293,97 @@ async def health_check():
                 "pipeline_initialized": False,
                 "stt_ready": False,
                 "llm_ready": False,
-                "tts_ready": False
+                "tts_ready": False,
             },
-            message="Pipeline not initialized"
+            message="Pipeline not initialized",
         )
-    
+
     try:
         components = await pipeline.health_check()
-        
         all_healthy = all(components.values())
-        
+        errors = getattr(pipeline, "initialization_errors", {}) or {}
         return HealthResponse(
             status="healthy" if all_healthy else "unhealthy",
             components=components,
-            message="All components ready" if all_healthy else "Some components not ready"
+            message=_health_message(components, errors),
         )
-        
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
         return HealthResponse(
             status="error",
             components={},
-            message=f"Health check failed: {str(e)}"
+            message=f"Health check failed: {str(e)}",
         )
 
 
 @app.post("/chat/text", response_model=TextResponse)
 async def chat_text(request: TextRequest):
     """
-    Process text query through the LLM agent.
-    
-    This endpoint allows testing the LLM component without audio processing.
+    Process a text query through the LLM agent.
+
+    Useful for testing the RAG + LLM stack without requiring STT or TTS.
     """
     global pipeline
-    
-    if not pipeline:
+
+    if not pipeline or not getattr(pipeline, "llm_agent", None):
         raise HTTPException(status_code=503, detail="Pipeline not initialized")
-    
+
     try:
-        import time
-        start_time = time.time()
-        
-        response_text, response_audio = await pipeline.process_text(
+        parameters = dict(request.parameters or {})
+        generate_audio = False
+        for name in ("generate_audio", "include_audio", "synthesize_audio"):
+            generate_audio = _coerce_bool(parameters.pop(name, None)) or generate_audio
+
+        response_text, audio_available, processing_time_ms = await pipeline.process_text_with_timing(
             request.text,
-            **(request.parameters or {})
+            generate_audio=generate_audio,
+            allow_tts_failure=True,
+            **parameters,
         )
-        
-        processing_time = int((time.time() - start_time) * 1000)
-        
+
         return TextResponse(
             response_text=response_text,
-            audio_available=len(response_audio) > 0,
-            processing_time_ms=processing_time
+            audio_available=audio_available,
+            processing_time_ms=processing_time_ms,
         )
-        
+
     except Exception as e:
         logger.error(f"Text processing failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/chat/audio", response_model=EnhancedAudioResponse)
+@app.post("/chat/audio", response_model=EnhancedAudioResponse | AudioErrorResponse)
 async def chat_audio(audio: UploadFile = File(...)):
     """
-    TODO: Process audio query through the complete pipeline.
-    
-    This endpoint handles the full STT -> LLM -> TTS pipeline.
-    
-    Args:
-        audio: Audio file upload (WAV, MP3, etc.)
-        
-    Returns:
-        JSON payload with base64 audio, transcript, and timing metadata
+    Process an audio file through the full STT -> LLM -> TTS pipeline.
+
+    Returns a JSON payload containing:
+    - ``audio_response``: base64-encoded MP3 audio
+    - ``transcript``: user's spoken text + agent's text response
+    - ``processing_time_ms``: total wall-clock time in milliseconds
     """
     global pipeline
-    
+    start_time = perf_counter()
+
     if not pipeline:
-        raise HTTPException(status_code=503, detail="Pipeline not initialized")
-    
+        return _audio_error_response(503, "Pipeline not initialized", start_time)
+
     try:
         audio_bytes = await audio.read()
         if len(audio_bytes) == 0:
-            raise HTTPException(status_code=400, detail="Empty audio file")
+            return _audio_error_response(400, "Empty audio file", start_time)
 
-        process_with_transcript = getattr(pipeline, "process_audio_with_transcript", None)
-        if not callable(process_with_transcript):
-            raise HTTPException(status_code=503, detail="Transcript-capable audio processing is unavailable")
-
-        response_audio, transcript_data, processing_time_ms = await process_with_transcript(
-            audio_bytes
+        response_audio, transcript_data, processing_time_ms = (
+            await pipeline.process_audio_with_transcript(audio_bytes)
         )
-        if not isinstance(response_audio, bytes):
-            raise HTTPException(status_code=500, detail="Audio response payload is missing or invalid")
+
+        if not isinstance(response_audio, bytes) or len(response_audio) == 0:
+            return _audio_error_response(
+                500,
+                "Audio response payload is missing or invalid",
+                start_time,
+            )
+
         encoded_audio = base64.b64encode(response_audio).decode("utf-8")
 
         return EnhancedAudioResponse(
@@ -307,45 +395,38 @@ async def chat_audio(audio: UploadFile = File(...)):
             ),
             processing_time_ms=int(processing_time_ms),
         )
-        
-    except HTTPException:
-        raise
+
+    except HTTPException as exc:
+        return _audio_error_response(exc.status_code, str(exc.detail), start_time)
     except Exception as e:
         logger.error(f"Audio processing failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return _audio_error_response(500, str(e), start_time)
 
 
 @app.get("/chat/audio/{text}")
 async def text_to_audio(text: str):
     """
-    TODO: Convert text to audio using TTS.
-    
-    Useful for testing TTS component independently.
-    
-    Args:
-        text: Text to convert to speech
-        
-    Returns:
-        Audio file as bytes
+    Convert a text string to speech and return the raw audio file.
+
+    Useful for quick TTS smoke-tests:
+        curl "http://localhost:8000/chat/audio/Hello%20world" --output test.mp3
     """
     global pipeline
-    
+
     if not pipeline:
         raise HTTPException(status_code=503, detail="Pipeline not initialized")
-    
+
     try:
         if not pipeline.tts:
             raise HTTPException(status_code=503, detail="TTS not available")
+
         audio_bytes = await pipeline.tts.synthesize(text)
-        
         return Response(
             content=audio_bytes,
             media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": f"attachment; filename=tts_output.mp3"
-            }
+            headers={"Content-Disposition": "attachment; filename=tts_output.mp3"},
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -356,32 +437,33 @@ async def text_to_audio(text: str):
 @app.post("/debug/stt")
 async def debug_stt(audio: UploadFile = File(...)):
     """
-    TODO: Debug endpoint for testing STT component independently.
-    
-    Args:
-        audio: Audio file to transcribe
-        
-    Returns:
-        Transcription result
+    Transcribe an uploaded audio file using only the STT component.
+
+    Useful for verifying STT accuracy in isolation:
+        curl -X POST http://localhost:8000/debug/stt -F "audio=@test.wav"
     """
     global pipeline
-    
+
     if not pipeline:
         raise HTTPException(status_code=503, detail="Pipeline not initialized")
-    
+
     try:
         audio_bytes = await audio.read()
 
         if not pipeline.stt:
             raise HTTPException(status_code=503, detail="STT not available")
+
         transcription = await pipeline.stt.transcribe(audio_bytes)
-        
         return {"transcription": transcription}
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"STT debug failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ── Streaming endpoints ───────────────────────────────────────────────────────
 
 async def _single_chunk_stream(audio_bytes: bytes) -> AsyncIterator[bytes]:
     """Wrap one audio payload as an async iterator for the streaming pipeline."""
@@ -391,10 +473,10 @@ async def _single_chunk_stream(audio_bytes: bytes) -> AsyncIterator[bytes]:
 @app.post("/chat/audio/stream")
 async def chat_audio_stream_http(audio: UploadFile = File(...)):
     """
-    HTTP streaming fallback endpoint.
-    Receives uploaded audio and streams response audio chunks.
+    HTTP streaming fallback: upload audio, receive audio chunks via chunked transfer.
     """
     global pipeline
+
     if not pipeline:
         raise HTTPException(status_code=503, detail="Pipeline not initialized")
 
@@ -403,12 +485,15 @@ async def chat_audio_stream_http(audio: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Empty audio file")
 
     stream_iter = pipeline.process_audio_stream(_single_chunk_stream(audio_bytes))
+
     first_audio_chunk: Optional[bytes] = None
     async for first_event in stream_iter:
-        first_event_type = first_event.get("type")
-        if first_event_type == "error":
-            raise HTTPException(status_code=502, detail=_pipeline_error_message(first_event))
-        if first_event_type == "tts.audio":
+        event_type = first_event.get("type")
+        if event_type == "error":
+            raise HTTPException(
+                status_code=502, detail=_pipeline_error_message(first_event)
+            )
+        if event_type == "tts.audio":
             piece = first_event.get("audio", b"")
             if piece:
                 first_audio_chunk = piece
@@ -438,13 +523,17 @@ async def chat_audio_stream_http(audio: UploadFile = File(...)):
 @app.websocket("/chat/audio/stream")
 async def chat_audio_stream_ws(websocket: WebSocket):
     """
-    WebSocket primary streaming endpoint.
-    - Client sends binary audio frames (WAV chunks recommended).
-    - Client sends text frame "END" to signal end of turn.
-    - Server returns JSON events:
-      - stt.partial
-      - llm.token
-      - tts.audio (base64-encoded audio chunk)
+    WebSocket low-latency streaming endpoint.
+
+    Protocol:
+    - Client sends binary frames (WAV audio chunks)
+    - Client sends text "END" to signal end of turn
+    - Server emits JSON events:
+      - ``stt.partial``  – incremental transcript text
+      - ``llm.token``    – LLM output token
+      - ``tts.audio``    – base64-encoded audio chunk
+      - ``stream.complete`` – turn finished
+      - ``error``        – pipeline error
     """
     global pipeline
     await websocket.accept()
@@ -483,7 +572,9 @@ async def chat_audio_stream_ws(websocket: WebSocket):
     try:
         async def enqueue_audio(item: Optional[bytes]) -> bool:
             try:
-                await asyncio.wait_for(queue.put(item), timeout=WS_QUEUE_PUT_TIMEOUT_SECONDS)
+                await asyncio.wait_for(
+                    queue.put(item), timeout=WS_QUEUE_PUT_TIMEOUT_SECONDS
+                )
                 return True
             except asyncio.TimeoutError:
                 await websocket.send_json(
@@ -512,9 +603,7 @@ async def chat_audio_stream_ws(websocket: WebSocket):
                     )
                     await websocket.close(code=1009)
                     break
-                enqueued = await enqueue_audio(audio_bytes)
-                if not enqueued:
-                    continue
+                await enqueue_audio(audio_bytes)
                 continue
 
             text = (message.get("text") or "").strip().upper()
@@ -533,13 +622,14 @@ async def chat_audio_stream_ws(websocket: WebSocket):
                 await processing_task
                 await websocket.send_json({"type": "stream.complete"})
                 break
+
             if text:
                 await websocket.send_json(
                     {"type": "warning", "message": "Send audio bytes or END."}
                 )
 
     except WebSocketDisconnect:
-        logger.info("Audio stream websocket disconnected.")
+        logger.info("Audio stream WebSocket disconnected.")
     except Exception as e:
         logger.error(f"WebSocket streaming failed: {str(e)}")
         await websocket.send_json({"type": "error", "message": str(e)})
@@ -551,12 +641,11 @@ async def chat_audio_stream_ws(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    
-    # TODO: Students can modify these settings for development
+
     uvicorn.run(
         "src.api.server:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,  # Enable auto-reload for development
-        log_level="info"
+        reload=True,
+        log_level="info",
     )

@@ -17,6 +17,22 @@ from src.tts.base_tts import BaseTTS, TTSService
 from src.utils.audio_chunking import split_wav_audio_chunks, OrderedTranscriptMerger
 
 
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
 @dataclass
 class PipelineConfig:
     """Configuration for the audio support pipeline."""
@@ -54,6 +70,7 @@ class AudioSupportPipeline:
         self.llm_agent: Optional[BaseAgent] = None
         self.tts: Optional[BaseTTS] = None
         self.is_initialized = False
+        self.initialization_errors: Dict[str, str] = {}
         
         if config.enable_logging:
             logging.basicConfig(level=logging.INFO)
@@ -77,30 +94,52 @@ class AudioSupportPipeline:
         """
         try:
             self.logger.info("Initializing Audio Support Pipeline...")
-            
-            self.logger.info("Initializing STT service...")
-            self.stt = STTService(self.config.stt_config)
-            await self.stt.initialize()
-            
-            self.logger.info("Initializing LLM agent...")
-            self.llm_agent = CustomerSupportAgent(self.config.llm_config)
-            await self.llm_agent.initialize()
-            
-            self.logger.info("Initializing TTS service...")
-            self.tts = TTSService(self.config.tts_config)
-            await self.tts.initialize()
-            
-            if not all(
-                [
-                    self.stt and self.stt.is_ready(),
-                    self.llm_agent and self.llm_agent.is_initialized,
-                    self.tts and self.tts.is_ready(),
-                ]
-            ):
-                raise RuntimeError("Some pipeline components failed to initialize")
-            
+
+            self.initialization_errors = {}
+
+            try:
+                self.logger.info("Initializing STT service...")
+                self.stt = STTService(self.config.stt_config)
+                await self.stt.initialize()
+            except Exception as exc:
+                self.stt = None
+                self.initialization_errors["stt"] = str(exc)
+                self.logger.warning("STT initialization failed: %s", exc)
+
+            try:
+                self.logger.info("Initializing LLM agent...")
+                self.llm_agent = CustomerSupportAgent(self.config.llm_config)
+                await self.llm_agent.initialize()
+            except Exception as exc:
+                self.llm_agent = None
+                self.initialization_errors["llm"] = str(exc)
+                self.logger.error("LLM initialization failed: %s", exc)
+
+            try:
+                self.logger.info("Initializing TTS service...")
+                self.tts = TTSService(self.config.tts_config)
+                await self.tts.initialize()
+            except Exception as exc:
+                self.tts = None
+                self.initialization_errors["tts"] = str(exc)
+                self.logger.warning("TTS initialization failed: %s", exc)
+
+            if not (self.llm_agent and self.llm_agent.is_initialized):
+                raise RuntimeError(
+                    self.initialization_errors.get(
+                        "llm", "LLM agent failed to initialize"
+                    )
+                )
+
             self.is_initialized = True
-            self.logger.info("Pipeline initialized successfully!")
+            if self.initialization_errors:
+                failed_components = ", ".join(sorted(self.initialization_errors))
+                self.logger.warning(
+                    "Pipeline initialized in degraded mode. Unavailable components: %s",
+                    failed_components,
+                )
+            else:
+                self.logger.info("Pipeline initialized successfully!")
             
         except Exception as e:
             self.logger.error(f"Pipeline initialization failed: {str(e)}")
@@ -163,19 +202,21 @@ class AudioSupportPipeline:
 
             self.logger.info("Converting speech to text...")
             text_input = await self.stt.transcribe(audio_bytes, **kwargs)
-            self.logger.info(f"Transcribed text: {text_input}")
+            normalized_user_input = str(text_input).strip()
+            self.logger.info(f"Transcribed text: {normalized_user_input}")
 
             self.logger.info("Processing query with LLM agent...")
-            agent_response = await self.llm_agent.process_query(text_input, **kwargs)
-            self.logger.info(f"Agent response: {agent_response}")
+            agent_response = await self.llm_agent.process_query(normalized_user_input, **kwargs)
+            normalized_agent_response = str(agent_response).strip()
+            self.logger.info(f"Agent response: {normalized_agent_response}")
 
             self.logger.info("Converting response to speech...")
-            response_audio = await self.tts.synthesize(agent_response, **kwargs)
+            response_audio = await self.tts.synthesize(normalized_agent_response, **kwargs)
             self.logger.info("Audio response generated successfully")
 
             transcript_data = self._create_transcript_data(
-                user_input=text_input,
-                agent_response=agent_response,
+                user_input=normalized_user_input,
+                agent_response=normalized_agent_response,
             )
             processing_time_ms = int((perf_counter() - start_time) * 1000)
 
@@ -200,34 +241,76 @@ class AudioSupportPipeline:
             raise RuntimeError("Pipeline not initialized. Call initialize() first.")
         
         try:
-            if not self.llm_agent or not self.tts:
-                raise RuntimeError("Pipeline components are unavailable")
+            if not self.llm_agent:
+                raise RuntimeError("LLM agent is unavailable")
+
+            generate_audio = _as_bool(kwargs.pop("generate_audio", False))
+            allow_tts_failure = _as_bool(kwargs.pop("allow_tts_failure", True))
 
             self.logger.info(f"Processing text query: {text_input}")
             agent_response = await self.llm_agent.process_query(text_input, **kwargs)
-            
-            response_audio = await self.tts.synthesize(agent_response, **kwargs)
-            
+            response_audio = b""
+
+            if generate_audio:
+                if not self.tts:
+                    if not allow_tts_failure:
+                        raise RuntimeError("TTS service is unavailable")
+                    self.logger.warning("Skipping TTS synthesis because TTS is unavailable.")
+                else:
+                    try:
+                        response_audio = await self.tts.synthesize(agent_response, **kwargs)
+                    except Exception as exc:
+                        if not allow_tts_failure:
+                            raise
+                        self.logger.warning(
+                            "Text response generated, but TTS synthesis failed: %s",
+                            exc,
+                        )
+
             return agent_response, response_audio
             
         except Exception as e:
             self.logger.error(f"Text processing failed: {str(e)}")
             raise
 
-    async def process_text_with_timing(self, text: str, **kwargs) -> Tuple[str, int]:
-        """Process text and return agent response text with end-to-end timing."""
+    async def process_text_with_timing(
+        self, text: str, **kwargs
+    ) -> Tuple[str, bool, int]:
+        """Process text and return response text, audio availability, and timing."""
         start_time = perf_counter()
         if not self.is_initialized:
             raise RuntimeError("Pipeline not initialized. Call initialize() first.")
 
         try:
             if not self.llm_agent:
-                raise RuntimeError("Pipeline components are unavailable")
+                raise RuntimeError("LLM agent is unavailable")
+
+            generate_audio = _as_bool(kwargs.pop("generate_audio", False))
+            allow_tts_failure = _as_bool(kwargs.pop("allow_tts_failure", True))
 
             self.logger.info(f"Processing text query: {text}")
             agent_response = await self.llm_agent.process_query(text, **kwargs)
+            audio_available = False
+
+            if generate_audio:
+                if not self.tts:
+                    if not allow_tts_failure:
+                        raise RuntimeError("TTS service is unavailable")
+                    self.logger.warning("Skipping TTS synthesis because TTS is unavailable.")
+                else:
+                    try:
+                        audio_bytes = await self.tts.synthesize(agent_response, **kwargs)
+                        audio_available = bool(audio_bytes)
+                    except Exception as exc:
+                        if not allow_tts_failure:
+                            raise
+                        self.logger.warning(
+                            "Text response generated, but TTS synthesis failed: %s",
+                            exc,
+                        )
+
             processing_time_ms = int((perf_counter() - start_time) * 1000)
-            return agent_response, processing_time_ms
+            return agent_response, audio_available, processing_time_ms
 
         except Exception as e:
             self.logger.error(f"Text processing failed: {str(e)}")
@@ -237,7 +320,10 @@ class AudioSupportPipeline:
         self, user_input: str, agent_response: str
     ) -> TranscriptData:
         """Create transcript data payload for callers."""
-        return TranscriptData(user_input=user_input, agent_response=agent_response)
+        return TranscriptData(
+            user_input=str(user_input).strip(),
+            agent_response=str(agent_response).strip(),
+        )
 
     async def process_audio_stream(
         self,
@@ -384,6 +470,7 @@ class AudioSupportPipeline:
             self.llm_agent = None
             self.tts = None
             self.is_initialized = False
+            self.initialization_errors = {}
             
             self.logger.info("Pipeline cleanup completed")
             

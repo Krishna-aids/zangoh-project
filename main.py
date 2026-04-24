@@ -1,5 +1,5 @@
 def main():
-    print("Hello from zangoh-internship!")
+    print("Hello from new-folder!")
 
 
 if __name__ == "__main__":

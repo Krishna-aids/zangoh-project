@@ -52,6 +52,8 @@ def init_session_state():
         st.session_state.recording = False
     if "audio_data" not in st.session_state:
         st.session_state.audio_data = None
+    if "audio_result" not in st.session_state:
+        st.session_state.audio_result = None
 
 def check_server_status(server_url: str) -> Dict[str, Any]:
     """Check if the API server is running and get health status."""
@@ -95,16 +97,24 @@ def send_text_message(server_url: str, text: str, parameters: Optional[Dict[str,
             headers={"Content-Type": "application/json"},
             timeout=30
         )
-        
+
+        response_data = {}
+        if response.headers.get("Content-Type", "").lower().startswith("application/json"):
+            response_data = response.json()
+
         if response.status_code == 200:
             return {
                 "success": True,
-                "data": response.json()
+                "data": response_data
             }
         else:
             return {
                 "success": False,
-                "error": f"HTTP {response.status_code}: {response.text}"
+                "error": (
+                    response_data.get("error")
+                    or response_data.get("detail")
+                    or f"HTTP {response.status_code}: {response.text}"
+                )
             }
     except requests.exceptions.RequestException as e:
         return {
@@ -125,33 +135,42 @@ def send_audio_message(server_url: str, audio_data: bytes) -> Dict[str, Any]:
             timeout=60  # Longer timeout for audio processing
         )
         
-        if response.status_code == 200:
+        response_data = {}
+        if response.headers.get("Content-Type", "").lower().startswith("application/json"):
             response_data = response.json()
-            if not response_data.get("success", False):
-                return {
-                    "success": False,
-                    "error": response_data.get("error", "Audio request was not successful")
-                }
 
-            audio_response = response_data.get("audio_response")
-            transcript = response_data.get("transcript") or {}
-            decoded_audio = base64.b64decode(audio_response, validate=True) if audio_response else b""
-
-            return {
-                "success": True,
-                "audio_data": decoded_audio,
-                "content_type": "audio/mpeg",
-                "transcript": {
-                    "user_input": transcript.get("user_input", ""),
-                    "agent_response": transcript.get("agent_response", "")
-                },
-                "processing_time_ms": response_data.get("processing_time_ms")
-            }
-        else:
+        if response.status_code != 200:
             return {
                 "success": False,
-                "error": f"HTTP {response.status_code}: {response.text}"
+                "error": (
+                    response_data.get("error")
+                    or response_data.get("detail")
+                    or f"HTTP {response.status_code}: {response.text}"
+                ),
+                "processing_time_ms": response_data.get("processing_time_ms"),
             }
+
+        if not response_data.get("success", False):
+            return {
+                "success": False,
+                "error": response_data.get("error", "Audio request was not successful"),
+                "processing_time_ms": response_data.get("processing_time_ms"),
+            }
+
+        audio_response = response_data.get("audio_response")
+        transcript = response_data.get("transcript") or {}
+        decoded_audio = base64.b64decode(audio_response, validate=True) if audio_response else b""
+
+        return {
+            "success": True,
+            "audio_data": decoded_audio,
+            "content_type": "audio/mpeg",
+            "transcript": {
+                "user_input": transcript.get("user_input", ""),
+                "agent_response": transcript.get("agent_response", "")
+            },
+            "processing_time_ms": response_data.get("processing_time_ms")
+        }
     except (ValueError, TypeError, binascii.Error) as e:
         return {
             "success": False,
@@ -274,6 +293,7 @@ def main():
     with tab1:
         st.header(" Text Chat Interface")
         st.markdown("Test the text-based conversation with your customer support agent.")
+        st.caption("Text chat only needs the LLM. Audio components can stay offline while you test prompt-response behavior.")
         
         # Chat interface
         user_message = st.text_input(
@@ -327,7 +347,7 @@ def main():
     
     with tab2:
         st.header(" Audio Chat Interface")
-        st.markdown("Test the complete audio pipeline: record audio, get audio response.")
+        st.markdown("Test the complete audio pipeline with response transcript and timing.")
         
         col1, col2 = st.columns(2)
         
@@ -360,35 +380,37 @@ def main():
                 st.session_state.audio_data = uploaded_file.read()
                 st.audio(st.session_state.audio_data)
         
-        with col2:
-            st.subheader(" Audio Output")
-            
-            # Send audio for processing
-            if st.session_state.audio_data:
-                if st.button(" Send Audio to Agent", type="primary"):
-                    with st.spinner("Processing audio... This may take a while."):
-                        result = send_audio_message(server_url, st.session_state.audio_data)
-                    
-                    if result['success']:
-                        st.success(" Audio processed successfully!")
-                        if result.get('processing_time_ms') is not None:
-                            st.caption(f" Processing time: {result['processing_time_ms']}ms")
+            if st.session_state.audio_data and st.button(" Send Audio to Agent", type="primary"):
+                with st.spinner("Processing audio... This may take a while."):
+                    st.session_state.audio_result = send_audio_message(server_url, st.session_state.audio_data)
 
-                        transcript = result.get('transcript', {})
-                        user_input = transcript.get('user_input')
-                        agent_response = transcript.get('agent_response')
-                        if user_input or agent_response:
-                            st.markdown("**Transcript**")
-                            if user_input:
-                                st.markdown(f"**You said:** {user_input}")
-                            if agent_response:
-                                st.markdown(f"**Agent replied:** {agent_response}")
-
-                        create_audio_player(result['audio_data'], "Agent Response")
-                    else:
-                        st.error(f" Error: {result['error']}")
+            latest_result = st.session_state.audio_result
+            if latest_result and latest_result.get("success"):
+                st.markdown("**Latest Agent Audio Response**")
+                create_audio_player(latest_result["audio_data"], "Agent Response")
+            elif st.session_state.audio_data:
+                st.info("Click **Send Audio to Agent** to generate a response.")
             else:
                 st.info("👆 Record or upload audio first")
+
+        with col2:
+            st.subheader(" Transcript")
+            latest_result = st.session_state.audio_result
+            if latest_result and latest_result.get("success"):
+                transcript = latest_result.get("transcript", {})
+                user_input = transcript.get("user_input", "")
+                agent_response = transcript.get("agent_response", "")
+                st.markdown(f"**User:** {user_input or '(empty)'}")
+                st.markdown(f"**Agent:** {agent_response or '(empty)'}")
+            elif latest_result and not latest_result.get("success"):
+                st.error(f"Error: {latest_result.get('error', 'Unknown error')}")
+            else:
+                st.info("Transcript will appear here after processing.")
+
+        latest_result = st.session_state.audio_result
+        if latest_result and latest_result.get("processing_time_ms") is not None:
+            st.markdown("**Processing Time**")
+            st.caption(f"Total: {latest_result['processing_time_ms']}ms")
     
     with tab3:
         st.header(" Health Monitor")
