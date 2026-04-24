@@ -35,6 +35,12 @@ The LLM agent also uses a built-in ChromaDB knowledge base containing customer s
 - Retrieval: ChromaDB + sentence-transformers
 - Transport: REST, chunked HTTP streaming, WebSocket streaming
 
+
+## Project Working Video
+
+ [streamlit-streamlit_app-2026-04-24-07-22-28.webm](https://github.com/user-attachments/assets/9966f464-2302-4008-9589-62327df72d1e)
+
+
 ## Project Structure
 
 ```text
