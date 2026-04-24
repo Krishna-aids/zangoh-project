@@ -37,8 +37,9 @@ The LLM agent also uses a built-in ChromaDB knowledge base containing customer s
 
 
 ## Project Working Video
+ [streamlit-streamlit_app-2026-04-24-07-35-46.webm](https://github.com/user-attachments/assets/0974d438-f290-4535-8d5d-c1b5315b71d6)
 
- [streamlit-streamlit_app-2026-04-24-07-22-28.webm](https://github.com/user-attachments/assets/9966f464-2302-4008-9589-62327df72d1e)
+
 
 
 ## Project Structure
